@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
+import { createClient } from 'redis';
 
 interface AnalyticsData {
 	metrics: {
@@ -20,11 +21,41 @@ interface AnalyticsData {
 	};
 }
 
-let analyticsStore: Record<string, any> = {
-	sessions: [],
-	events: [],
-	performance: []
+// Redis client initialization
+const redisClient = createClient({
+	url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+
+// Add logging helper
+const logRedisAction = (action: string, key?: string, value?: any) => {
+	console.log(`[REDIS] ${action}${key ? ` ${key}` : ''}${value ? ` ${JSON.stringify(value)}` : ''}`);
 };
+
+// Connect to Redis
+redisClient.on('error', (err) => {
+	console.error('Redis Client Error', err);
+});
+redisClient.on('connect', () => {
+	console.log('Redis Client Connected');
+});
+redisClient.on('ready', () => {
+	console.log('Redis Client Ready');
+});
+redisClient.connect().catch(console.error);
+
+// Initialize counters if they don't exist
+async function initializeCounters() {
+	logRedisAction('CHECK_EXISTS', 'analytics:pageViews');
+	const exists = await redisClient.exists('analytics:pageViews');
+	if (!exists) {
+		logRedisAction('SET', 'analytics:pageViews', 0);
+		await redisClient.set('analytics:pageViews', 0);
+		logRedisAction('SET', 'analytics:uniqueVisitors', 0);
+		await redisClient.set('analytics:uniqueVisitors', 0);
+	}
+}
+
+initializeCounters().catch(console.error);
 
 export const POST: RequestHandler = async ({ request }) => {
 	try {
@@ -33,33 +64,57 @@ export const POST: RequestHandler = async ({ request }) => {
 		
 		switch (data.type) {
 			case 'pageview':
-				analyticsStore.sessions.push({
+				// Increment page views counter
+				logRedisAction('INCR', 'analytics:pageViews');
+				await redisClient.incr('analytics:pageViews');
+				
+				// Store session data
+				const sessionId = data.sessionId || crypto.randomUUID();
+				logRedisAction('LPUSH', 'analytics:sessions', { ...data, timestamp, id: sessionId });
+				await redisClient.lPush('analytics:sessions', JSON.stringify({
 					...data,
 					timestamp,
-					id: crypto.randomUUID()
-				});
+					id: sessionId
+				}));
+				
+				// Trim the list to keep only the last 1000 sessions
+				logRedisAction('LTRIM', 'analytics:sessions', [0, 999]);
+				await redisClient.lTrim('analytics:sessions', 0, 999);
 				break;
 				
 			case 'event':
-				analyticsStore.events.push({
+				// Store event data
+				logRedisAction('LPUSH', 'analytics:events', { ...data, timestamp, id: crypto.randomUUID() });
+				await redisClient.lPush('analytics:events', JSON.stringify({
 					...data,
 					timestamp,
 					id: crypto.randomUUID()
-				});
+				}));
+				
+				// Trim the list to keep only the last 10000 events
+				logRedisAction('LTRIM', 'analytics:events', [0, 9999]);
+				await redisClient.lTrim('analytics:events', 0, 9999);
 				break;
 				
 			case 'performance':
-				analyticsStore.performance.push({
+				// Store performance data
+				logRedisAction('LPUSH', 'analytics:performance', { ...data, timestamp, id: crypto.randomUUID() });
+				await redisClient.lPush('analytics:performance', JSON.stringify({
 					...data,
 					timestamp,
 					id: crypto.randomUUID()
-				});
+				}));
+				
+				// Trim the list to keep only the last 1000 performance records
+				logRedisAction('LTRIM', 'analytics:performance', [0, 999]);
+				await redisClient.lTrim('analytics:performance', 0, 999);
 				break;
 		}
 		
 		return json({ success: true, recorded: timestamp });
 		
 	} catch (error) {
+		console.error('[REDIS] Error in POST handler:', error);
 		return json({ 
 			error: 'Failed to record analytics',
 			details: error instanceof Error ? error.message : 'Unknown error'
@@ -86,21 +141,55 @@ export const GET: RequestHandler = async ({ url }) => {
 			timeFilter = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 	}
 	
-	const recentSessions = analyticsStore.sessions.filter(s => 
-		new Date(s.timestamp) > timeFilter
-	);
+	// Get page views from Redis
+	logRedisAction('GET', 'analytics:pageViews');
+	const pageViews = await redisClient.get('analytics:pageViews') || '0';
 	
-	const recentEvents = analyticsStore.events.filter(e => 
-		new Date(e.timestamp) > timeFilter
-	);
+	// Get sessions from Redis
+	logRedisAction('LRANGE', 'analytics:sessions', [0, -1]);
+	const sessionStrings = await redisClient.lRange('analytics:sessions', 0, -1);
+	const recentSessions = sessionStrings
+		.map(s => {
+			try {
+				return JSON.parse(s);
+			} catch (e) {
+				console.error('[REDIS] Error parsing session data:', e);
+				return null;
+			}
+		})
+		.filter(s => s && new Date(s.timestamp) > timeFilter);
 	
-	const recentPerformance = analyticsStore.performance.filter(p => 
-		new Date(p.timestamp) > timeFilter
-	);
+	// Get events from Redis
+	logRedisAction('LRANGE', 'analytics:events', [0, -1]);
+	const eventStrings = await redisClient.lRange('analytics:events', 0, -1);
+	const recentEvents = eventStrings
+		.map(e => {
+			try {
+				return JSON.parse(e);
+			} catch (e) {
+				console.error('[REDIS] Error parsing event data:', e);
+				return null;
+			}
+		})
+		.filter(e => e && new Date(e.timestamp) > timeFilter);
+	
+	// Get performance data from Redis
+	logRedisAction('LRANGE', 'analytics:performance', [0, -1]);
+	const performanceStrings = await redisClient.lRange('analytics:performance', 0, -1);
+	const recentPerformance = performanceStrings
+		.map(p => {
+			try {
+				return JSON.parse(p);
+			} catch (e) {
+				console.error('[REDIS] Error parsing performance data:', e);
+				return null;
+			}
+		})
+		.filter(p => p && new Date(p.timestamp) > timeFilter);
 	
 	const analytics: AnalyticsData = {
 		metrics: {
-			pageViews: recentSessions.length,
+			pageViews: parseInt(pageViews),
 			uniqueVisitors: new Set(recentSessions.map(s => s.userId || s.sessionId)).size,
 			averageSessionTime: calculateAverageSessionTime(recentSessions),
 			bounceRate: calculateBounceRate(recentSessions, recentEvents)
@@ -117,6 +206,13 @@ export const GET: RequestHandler = async ({ url }) => {
 		}
 	};
 	
+	logRedisAction('GET_COMPLETE', 'analytics', {
+		pageViews: parseInt(pageViews),
+		sessions: recentSessions.length,
+		events: recentEvents.length,
+		performance: recentPerformance.length
+	});
+	
 	return json({
 		analytics,
 		timeframe,
@@ -126,6 +222,45 @@ export const GET: RequestHandler = async ({ url }) => {
 			performance: recentPerformance.length
 		}
 	});
+};
+
+// Add a new endpoint for page view tracking
+export const PUT: RequestHandler = async ({ request }) => {
+	try {
+		const data = await request.json();
+		
+		// Increment page views counter
+		logRedisAction('INCR', 'analytics:pageViews');
+		const pageViews = await redisClient.incr('analytics:pageViews');
+		
+		// Store session data
+		const sessionId = data.sessionId || crypto.randomUUID();
+		logRedisAction('LPUSH', 'analytics:sessions', { ...data, timestamp: new Date().toISOString(), id: sessionId });
+		await redisClient.lPush('analytics:sessions', JSON.stringify({
+			...data,
+			timestamp: new Date().toISOString(),
+			id: sessionId
+		}));
+		
+		// Trim the list to keep only the last 1000 sessions
+		logRedisAction('LTRIM', 'analytics:sessions', [0, 999]);
+		await redisClient.lTrim('analytics:sessions', 0, 999);
+		
+		logRedisAction('PAGE_VIEW_RECORDED', 'analytics', { pageViews, sessionId });
+		
+		return json({ 
+			success: true, 
+			pageViews,
+			message: 'Page view recorded'
+		});
+		
+	} catch (error) {
+		console.error('[REDIS] Error in PUT handler:', error);
+		return json({ 
+			error: 'Failed to record page view',
+			details: error instanceof Error ? error.message : 'Unknown error'
+		}, { status: 500 });
+	}
 };
 
 function calculateAverageSessionTime(sessions: any[]): number {

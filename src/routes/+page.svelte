@@ -6,6 +6,29 @@
 	let processingType = $state('calculation');
 	let analyticsData = $state(null);
 	let interactions = $state([]);
+	let analyticsInterval = $state(null);
+	let isAnalyticsLoading = $state(false);
+
+	// Load analytics when component mounts
+	$effect(() => {
+		// Send page view event
+		sendPageView();
+		
+		// Load initial analytics data
+		loadAnalytics();
+		
+		// Set up interval to refresh analytics every 30 seconds
+		analyticsInterval = setInterval(() => {
+			loadAnalytics();
+		}, 30000);
+		
+		// Clean up interval when component unmounts
+		return () => {
+			if (analyticsInterval) {
+				clearInterval(analyticsInterval);
+			}
+		};
+	});
 
 	async function logInteraction(action, metadata) {
 		try {
@@ -16,6 +39,21 @@
 			});
 		} catch (error) {
 			console.error('Failed to log interaction:', error);
+		}
+	}
+
+	async function sendPageView() {
+		try {
+			await fetch('/api/analytics', {
+				method: 'PUT',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ 
+					url: '/dashboard',
+					timestamp: new Date().toISOString()
+				})
+			});
+		} catch (error) {
+			console.error('Failed to send page view:', error);
 		}
 	}
 
@@ -62,11 +100,15 @@
 	}
 
 	async function loadAnalytics() {
+		isAnalyticsLoading = true;
 		try {
 			const response = await fetch('/api/analytics');
-			analyticsData = await response.json();
+			const newData = await response.json();
+			analyticsData = newData; // This should trigger reactivity
 		} catch (error) {
 			analyticsData = { error: error.message };
+		} finally {
+			isAnalyticsLoading = false;
 		}
 	}
 
@@ -138,8 +180,13 @@
 			<!-- Analytics -->
 			<div class="border-2 border-gray-200 p-4 md:p-6 rounded-xl">
 				<h3 class="font-semibold text-gray-900 mb-4 text-xl">Analytics</h3>
-				<button onclick={loadAnalytics} class="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 text-white px-4 py-3 md:px-6 md:py-3 rounded-lg text-base transition-colors">
-					Load Analytics
+				<button onclick={loadAnalytics} class="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 text-white px-4 py-3 md:px-6 md:py-3 rounded-lg text-base transition-colors flex items-center justify-center gap-2">
+					{#if isAnalyticsLoading}
+						<span class="inline-block h-5 w-5 animate-spin rounded-full border-2 border-solid border-white border-r-transparent align-[-0.125em]"></span>
+						<span>Loading...</span>
+					{:else}
+						<span>Load Analytics</span>
+					{/if}
 				</button>
 				{#if analyticsData}
 					<div class="mt-4 space-y-3">

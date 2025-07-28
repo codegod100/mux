@@ -1,5 +1,6 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
+import { createClient } from 'redis';
 
 interface InteractionLog {
 	id: string;
@@ -8,7 +9,27 @@ interface InteractionLog {
 	metadata?: Record<string, any>;
 }
 
-let interactions: InteractionLog[] = [];
+// Redis client initialization
+const redisClient = createClient({
+	url: process.env.REDIS_URL || 'redis://localhost:6379'
+});
+
+// Add logging helper
+const logRedisAction = (action: string, key?: string, value?: any) => {
+	console.log(`[REDIS] ${action}${key ? ` ${key}` : ''}${value ? ` ${JSON.stringify(value)}` : ''}`);
+};
+
+// Connect to Redis
+redisClient.on('error', (err) => {
+	console.error('Redis Client Error', err);
+});
+redisClient.on('connect', () => {
+	console.log('Redis Client Connected');
+});
+redisClient.on('ready', () => {
+	console.log('Redis Client Ready');
+});
+redisClient.connect().catch(console.error);
 
 export const POST: RequestHandler = async ({ request }) => {
 	try {
@@ -21,19 +42,28 @@ export const POST: RequestHandler = async ({ request }) => {
 			metadata
 		};
 		
-		interactions.push(interaction);
+		// Store interaction in Redis
+		logRedisAction('LPUSH', 'interactions', interaction);
+		await redisClient.lPush('interactions', JSON.stringify(interaction));
 		
-		if (interactions.length > 1000) {
-			interactions = interactions.slice(-1000);
-		}
+		// Trim the list to keep only the last 1000 interactions
+		logRedisAction('LTRIM', 'interactions', [0, 999]);
+		await redisClient.lTrim('interactions', 0, 999);
+		
+		// Get the current length
+		logRedisAction('LLEN', 'interactions');
+		const totalInteractions = await redisClient.lLen('interactions');
+		
+		logRedisAction('INTERACTION_RECORDED', 'interactions', { action, totalInteractions });
 		
 		return json({
 			success: true,
 			interaction,
-			totalInteractions: interactions.length
+			totalInteractions
 		});
 		
 	} catch (error) {
+		console.error('[REDIS] Error in POST handler:', error);
 		return json({ 
 			error: 'Failed to log interaction',
 			details: error instanceof Error ? error.message : 'Unknown error'
@@ -45,24 +75,45 @@ export const GET: RequestHandler = async ({ url }) => {
 	const limit = Number(url.searchParams.get('limit')) || 50;
 	const action = url.searchParams.get('action');
 	
-	let filteredInteractions = interactions;
+	// Get all interactions from Redis
+	logRedisAction('LRANGE', 'interactions', [0, -1]);
+	const interactionStrings = await redisClient.lRange('interactions', 0, -1);
+	let interactions = interactionStrings.map(i => {
+		try {
+			return JSON.parse(i);
+		} catch (e) {
+			console.error('[REDIS] Error parsing interaction data:', e);
+			return null;
+		}
+	}).filter(i => i !== null);
 	
 	if (action) {
-		filteredInteractions = interactions.filter(i => i.action === action);
+		interactions = interactions.filter(i => i.action === action);
 	}
 	
-	const recentInteractions = filteredInteractions
-		.slice(-limit)
+	const recentInteractions = interactions
+		.slice(0, limit)
 		.reverse();
 	
+	logRedisAction('LLEN', 'interactions');
+	const totalInteractions = await redisClient.lLen('interactions');
+	const uniqueActions = [...new Set(interactions.map(i => i.action))];
+	const lastHour = interactions.filter(i => 
+		new Date(i.timestamp) > new Date(Date.now() - 60 * 60 * 1000)
+	).length;
+	
 	const stats = {
-		total: interactions.length,
-		filtered: filteredInteractions.length,
-		actions: [...new Set(interactions.map(i => i.action))],
-		lastHour: interactions.filter(i => 
-			new Date(i.timestamp) > new Date(Date.now() - 60 * 60 * 1000)
-		).length
+		total: totalInteractions,
+		filtered: interactions.length,
+		actions: uniqueActions,
+		lastHour
 	};
+	
+	logRedisAction('INTERACTIONS_RETRIEVED', 'interactions', { 
+		total: totalInteractions, 
+		filtered: interactions.length, 
+		limit 
+	});
 	
 	return json({
 		interactions: recentInteractions,
