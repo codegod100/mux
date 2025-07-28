@@ -8,6 +8,7 @@
 	let interactions = $state([]);
 	let analyticsInterval = $state(null);
 	let isAnalyticsLoading = $state(false);
+	let lastMouseMoveTime = $state(0);
 
 	// Load analytics when component mounts
 	$effect(() => {
@@ -17,16 +18,39 @@
 		// Load initial analytics data
 		loadAnalytics();
 		
+		// Load initial interactions data
+		loadInteractions();
+		
+		// Load initial API status
+		testApiEndpoint('');
+		
 		// Set up interval to refresh analytics every 30 seconds
 		analyticsInterval = setInterval(() => {
 			loadAnalytics();
 		}, 30000);
 		
-		// Clean up interval when component unmounts
+		// Add mouse movement tracking
+		const handleMouseMove = (event) => {
+			const now = Date.now();
+			// Throttle to once per second to avoid spam
+			if (now - lastMouseMoveTime > 1000) {
+				lastMouseMoveTime = now;
+				logInteraction('mouse_movement', {
+					x: event.clientX,
+					y: event.clientY,
+					timestamp: new Date().toISOString()
+				});
+			}
+		};
+		
+		document.addEventListener('mousemove', handleMouseMove);
+		
+		// Clean up interval and event listener when component unmounts
 		return () => {
 			if (analyticsInterval) {
 				clearInterval(analyticsInterval);
 			}
+			document.removeEventListener('mousemove', handleMouseMove);
 		};
 	});
 
@@ -116,7 +140,7 @@
 		try {
 			const response = await fetch('/api/interactions?limit=10');
 			const data = await response.json();
-			interactions = data.interactions || [];
+			interactions = (data.interactions || []).reverse();
 		} catch (error) {
 			interactions = [];
 		}
@@ -136,13 +160,10 @@
 			<p class="text-gray-600 text-base md:text-lg">Test and interact with backend services</p>
 		</div>
 		
-		<div class="space-y-6 md:space-y-8 max-h-[600px] overflow-y-auto pr-2">
+		<div class="space-y-6 md:space-y-8">
 			<!-- API Health Check -->
 			<div class="border-2 border-gray-200 p-4 md:p-6 rounded-xl">
 				<h3 class="font-semibold text-gray-900 mb-4 text-xl">API Health Check</h3>
-				<button onclick={() => testApiEndpoint('')} class="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white px-4 py-3 md:px-6 md:py-3 rounded-lg text-base transition-colors">
-					Test API Status
-				</button>
 				{#if apiResults['']}
 					<pre class="mt-4 text-sm bg-gray-100 p-4 rounded-lg overflow-x-auto">{JSON.stringify(apiResults[''], null, 2)}</pre>
 				{/if}
@@ -180,14 +201,6 @@
 			<!-- Analytics -->
 			<div class="border-2 border-gray-200 p-4 md:p-6 rounded-xl">
 				<h3 class="font-semibold text-gray-900 mb-4 text-xl">Analytics</h3>
-				<button onclick={loadAnalytics} class="w-full sm:w-auto bg-purple-600 hover:bg-purple-700 text-white px-4 py-3 md:px-6 md:py-3 rounded-lg text-base transition-colors flex items-center justify-center gap-2">
-					{#if isAnalyticsLoading}
-						<span class="inline-block h-5 w-5 animate-spin rounded-full border-2 border-solid border-white border-r-transparent align-[-0.125em]"></span>
-						<span>Loading...</span>
-					{:else}
-						<span>Load Analytics</span>
-					{/if}
-				</button>
 				{#if analyticsData}
 					<div class="mt-4 space-y-3">
 						{#if analyticsData.analytics}
@@ -198,7 +211,7 @@
 								<strong>Performance:</strong> {analyticsData.analytics.performance.loadTime.toFixed(2)}ms avg load time
 							</div>
 						{/if}
-						<pre class="text-sm bg-gray-100 p-4 rounded-lg overflow-x-auto max-h-40">{JSON.stringify(analyticsData, null, 2)}</pre>
+						<pre class="text-sm bg-gray-100 p-4 rounded-lg overflow-x-auto">{JSON.stringify(analyticsData, null, 2)}</pre>
 					</div>
 				{/if}
 			</div>
@@ -206,11 +219,8 @@
 			<!-- Interactions Log -->
 			<div class="border-2 border-gray-200 p-4 md:p-6 rounded-xl">
 				<h3 class="font-semibold text-gray-900 mb-4 text-xl">Recent Interactions</h3>
-				<button onclick={loadInteractions} class="w-full sm:w-auto bg-orange-600 hover:bg-orange-700 text-white px-4 py-3 md:px-6 md:py-3 rounded-lg text-base transition-colors">
-					Load Recent Interactions
-				</button>
 				{#if interactions.length > 0}
-					<div class="mt-4 space-y-2 max-h-40 overflow-y-auto">
+					<div class="mt-4 space-y-2 h-40 overflow-y-auto">
 						{#each interactions as interaction}
 							<div class="text-sm bg-gray-50 p-3 rounded-lg">
 								<strong>{interaction.action}</strong> - {new Date(interaction.timestamp).toLocaleTimeString()}
